@@ -1,0 +1,52 @@
+name: 'PCI Payment Page Script Check'
+description: 'Inventory the third-party scripts on a payment page and fail the build on scripts you have not authorized (PCI DSS v4.0.1 req 6.4.3 / 11.6.1).'
+author: 'Toledo Technologies LLC'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  url:
+    description: 'Public https URL of the payment page to check. Use this or html-file.'
+    required: false
+    default: ''
+  html-file:
+    description: 'Path to a saved HTML file to check instead of a URL. Use when the page needs a login or is not deployed yet.'
+    required: false
+    default: ''
+  allowed-domains:
+    description: 'Comma-separated hosts you have authorized to serve scripts, e.g. "js.stripe.com,www.googletagmanager.com". Leave blank for an inventory with no authorization check.'
+    required: false
+    default: ''
+  fail-on:
+    description: 'Fail the job when findings at this severity or above are present: high, medium, low, or never.'
+    required: false
+    default: 'high'
+  api-base:
+    description: 'Override the service endpoint. Only needed for self-hosting.'
+    required: false
+    default: 'https://qi.toledotechnologies.com'
+
+outputs:
+  passed:
+    description: 'true when no finding met the fail-on threshold'
+    value: ${{ steps.check.outputs.passed }}
+  findings:
+    description: 'Number of findings returned'
+    value: ${{ steps.check.outputs.findings }}
+  report:
+    description: 'The full JSON result'
+    value: ${{ steps.check.outputs.report }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: check
+      shell: bash
+      run: python3 "${{ github.action_path }}/scripts/check.py"
+      env:
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_HTML_FILE: ${{ inputs.html-file }}
+        INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_API_BASE: ${{ inputs.api-base }}

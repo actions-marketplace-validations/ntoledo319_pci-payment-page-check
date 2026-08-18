@@ -1,0 +1,21 @@
+name: self-test
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A page with a script from a host that is not authorized: this must fail.
+      - run: |
+          printf '%s' '<html><head><script src="https://js.stripe.com/v3"></script><script src="https://unknown-vendor.example/t.js"></script></head></html>' > /tmp/page.html
+      - id: scan
+        continue-on-error: true
+        uses: ./
+        with:
+          html-file: /tmp/page.html
+          allowed-domains: js.stripe.com
+          fail-on: high
+      - name: the unauthorized script must have been caught
+        run: |
+          echo "passed=${{ steps.scan.outputs.passed }}"
+          test "${{ steps.scan.outputs.passed }}" = "false"
