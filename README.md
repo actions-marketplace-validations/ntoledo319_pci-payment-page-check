@@ -3,11 +3,14 @@
 Inventory the third-party scripts on your payment page, and fail the build when
 one appears that you have not authorized.
 
+[![self-test](https://github.com/ntoledo319/pci-payment-page-check/actions/workflows/selftest.yml/badge.svg)](https://github.com/ntoledo319/pci-payment-page-check/actions/workflows/selftest.yml)
+
 PCI DSS v4.0.1 requirement **6.4.3** asks you to confirm every script loaded on
 a payment page is authorized, assure its integrity, and keep an inventory with a
 written justification. Requirement **11.6.1** asks you to detect unauthorized
-change to those scripts and the security-impacting HTTP headers. Both became
-mandatory on 31 March 2025.
+change to those scripts and the security-impacting HTTP headers. Their
+future-dated provisions became effective on 31 March 2025 where the respective
+requirement applies.
 
 The failure mode is rarely the payment provider's script. It is the analytics
 tag added for a campaign, the chat widget added by support, and the tag manager
@@ -23,6 +26,7 @@ during an assessment.
     url: https://yourstore.com/checkout
     allowed-domains: js.stripe.com, www.googletagmanager.com
     fail-on: high
+    payment-page-scope: direct
 ```
 
 Checking a page that is not deployed yet, or sits behind a login:
@@ -31,17 +35,25 @@ Checking a page that is not deployed yet, or sits behind a login:
 - uses: ntoledo319/pci-payment-page-check@v1
   with:
     html-file: dist/checkout.html
+    page-origin: https://yourstore.com/checkout
     allowed-domains: js.stripe.com
+    payment-page-scope: direct
 ```
+
+`html-file` is uploaded to the hosted check. Use a generated public-page
+artifact, not an authenticated DOM dump. Never include credentials, card data,
+customer data, payment details, or private source.
 
 ### Inputs
 
 | Input | Default | Description |
 | --- | --- | --- |
 | `url` | — | Public https URL of the payment page. Use this or `html-file`. |
-| `html-file` | — | Saved HTML to check instead of a URL. |
+| `html-file` | — | Workspace-relative UTF-8 HTML to upload and check instead of a URL. Absolute, outside-workspace, and symlink paths are refused. |
+| `page-origin` | `https://example.invalid/checkout` | HTTPS page URL used only to resolve relative sources in `html-file` mode. |
 | `allowed-domains` | — | Hosts you have authorized, comma-separated. Blank gives an inventory with no authorization check. |
 | `fail-on` | `high` | Fail at this severity or above: `high`, `medium`, `low`, `never`. |
+| `payment-page-scope` | `unspecified` | `direct`, `embedded`, `outsourced`, or `unspecified`. Only `direct` can expose requirement-specific paid next steps. |
 | `api-base` | hosted | Override the service endpoint. |
 
 ### Outputs
@@ -56,16 +68,18 @@ A table of findings is written to the job summary on every run.
 
 ## What it does and does not do
 
-It reads the HTML your server returns and inspects the scripts it references.
-It reports scripts served from hosts you did not list, scripts with no
-integrity attribute, and inline blocks that need a justification in your
-inventory.
+It reads served HTML (or the saved HTML you explicitly select) and inventories
+the script elements present there. It reports observed script hosts outside
+your declared list, missing observed integrity attributes, inline blocks, and
+bounded parser limitations. `fail-on` evaluates the complete returned finding
+set, including medium and low findings.
 
-It does **not** execute the page in a browser, so a script injected at runtime
-by another script is outside what it can see. It cannot decide whether a script
-is *authorized* — only you know that, which is why `allowed-domains` is yours to
-supply. A clean result means the checks performed found nothing, not that
-nothing is wrong.
+It does **not** inspect HTTP response headers, fetch referenced script bytes, or
+execute the page in a browser. A script injected at runtime by another script
+is outside what it can see. It cannot decide whether a script is *authorized* —
+only you know that, which is why `allowed-domains` is yours to supply. A clean
+result means the bounded checks performed found nothing, not that nothing is
+wrong.
 
 It is software-generated evidence for qualified human review. It does not
 determine your PCI DSS compliance, does not replace a Qualified Security
@@ -75,34 +89,52 @@ you — your acquiring bank sets that.
 ## A correction worth knowing
 
 Most write-ups still say SAQ A merchants must comply with 6.4.3 and 11.6.1.
-That stopped being true on 31 March 2025: both were removed from SAQ A and
-replaced with an eligibility criterion covering your **entire site**, not just
-the payment page. Merchants who cannot meet that criterion validate to SAQ A-EP
-or SAQ D, where both requirements still apply in full.
+That stopped being true on 31 March 2025: both were removed from SAQ A. PCI SSC
+FAQ 1588 says the replacement script-security eligibility criterion applies to
+a merchant page with an embedded processor payment form, such as an iframe. It
+does **not** apply to processor redirects or fully outsourced payment flows.
+For an embedded form, PCI SSC says protective techniques such as those in 6.4.3
+and 11.6.1—or confirmation from the compliant processor—can support the
+criterion. Confirm the applicable questionnaire with your acquirer or payment
+brand.
 
-[What changed for SAQ A](https://qi.toledotechnologies.com/pci/saq-a-script-security-confirmation)
+[PCI SSC FAQ 1588](https://www.pcisecuritystandards.org/faqs/1588/)
+· [What changed for SAQ A](https://qi.toledotechnologies.com/pci/saq-a-script-security-confirmation)
 · [6.4.3 explained](https://qi.toledotechnologies.com/pci/pci-dss-6-4-3-payment-page-scripts)
 · [11.6.1 explained](https://qi.toledotechnologies.com/pci/pci-dss-11-6-1-change-and-tamper-detection)
 
 ## Privacy
 
-The action sends the page URL, or the HTML you point it at, and your authorized
-domain list to the hosted check. No cardholder data is involved — the check
-never sees any. Results are returned to the workflow and not retained against
-an account, because no account exists.
+The action sends the public page URL—or the workspace-relative HTML file you
+explicitly select—plus the authorized-domain list and scope choice to the
+hosted check. The application processes the request to return the result and
+does not persist the raw HTML or free result; ordinary web-server logs still
+apply. No account, cookie, or cross-request identifier is created.
 
-Analysis runs as a hosted service rather than in your runner. Beyond keeping
-the action dependency-free, the check has to fetch the contents of the scripts
-a page references, and doing that from inside your CI network is something a
-security tool should not do casually.
+The check does not request card numbers, customer names, email addresses,
+payment details, credentials, authenticated DOM state, or private source. Do
+not include any of them in an uploaded file. Prefer `url` mode when the page is
+public; use `html-file` only for a deliberately generated, reviewable artifact.
+
+## From a check to reviewable evidence
+
+The free result is an observation, not a compliance determination. If it finds
+an actionable gap, inspect the representative deliverables before deciding
+whether to buy:
+
+- [PCI DSS 6.4.3 remediation-pack sample](https://qi.toledotechnologies.com/samples/pci-dss-6-4-3-remediation-pack)
+- [PCI DSS 11.6.1 evidence-ledger sample](https://qi.toledotechnologies.com/samples/pci-dss-11-6-1-evidence-ledger)
+- [Run the browser check or compare exact prices](https://qi.toledotechnologies.com/pci-4-compliance-scanner)
 
 ## Ongoing monitoring
 
 Requirement 11.6.1 asks for evaluation at least every seven days, indefinitely
 — a CI run only covers the moment you deploy. A hosted
 [evidence ledger](https://qi.toledotechnologies.com/pci/pci-dss-11-6-1-change-and-tamper-detection)
-re-checks the page on a schedule and records each evaluation in a hash-chained
-history, so altered or deleted records are detectable.
+re-checks one authorized public HTTPS page every 72 hours and records each
+evaluation in a hash-chained history, so altered or deleted records are
+detectable. It provides a private status endpoint for your alerting system to
+poll; it does not itself notify personnel.
 
 ## Licence
 

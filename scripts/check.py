@@ -1,29 +1,40 @@
 #!/usr/bin/env python3
-"""Check a payment page's scripts against the list you authorized.
+"""Check a payment page's served HTML against the list you authorized.
 
 Standard library only, on purpose. An action that pip-installs is an action
 that breaks in somebody's locked-down runner, and a compliance check that
 fails to run is worse than no check — it produces a green tick nobody earned.
 
-The analysis runs as a hosted service rather than in the runner. That is not
-only a distribution choice: the check has to fetch the scripts a page
-references to see whether their contents changed, and doing that from inside
-somebody's CI network is a thing a security tool should not do casually.
+The hosted service fetches a public URL or inspects the saved HTML explicitly
+selected by the workflow. This client never claims to execute JavaScript, read
+HTTP response headers, or fetch referenced script bytes.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+from urllib.parse import urlsplit
 
 TIMEOUT_SECONDS = 60
 MAX_HTML_BYTES = 2_000_000
+MAX_RESPONSE_BYTES = 4_000_000
+MAX_FINDINGS = 1_000
+MAX_OUTPUT_UTF16_BYTES = 900_000
+MAX_SUMMARY_BYTES = 900_000
+MAX_CELL_CHARS = 1_000
+MAX_LOG_CHARS = 1_000
+DEFAULT_PAGE_ORIGIN = "https://example.invalid/checkout"
 
 # Ordered, so "fail on medium" also fails on high.
-SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3}
+FAIL_THRESHOLDS = {"low", "medium", "high"}
+PAYMENT_PAGE_SCOPES = {"unspecified", "direct", "embedded", "outsourced"}
 
 
 def _in(name: str, default: str = "") -> str:
@@ -34,10 +45,16 @@ def _out(key: str, value: str) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
         return
+    if not key.replace("-", "").isalnum():
+        _fail("An internal output name was invalid.")
     # Multi-line values need the delimiter form or the runner truncates them.
+    # A random delimiter prevents a scanned value from terminating the output.
     with open(path, "a", encoding="utf-8") as handle:
-        if "\n" in value:
-            handle.write(f"{key}<<__EOF__\n{value}\n__EOF__\n")
+        if "\n" in value or "\r" in value:
+            delimiter = f"CSI_{secrets.token_hex(16)}"
+            while delimiter in value:
+                delimiter = f"CSI_{secrets.token_hex(16)}"
+            handle.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
         else:
             handle.write(f"{key}={value}\n")
 
@@ -46,13 +63,76 @@ def _summary(markdown: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
         return
+    encoded = markdown.encode("utf-8")
+    if len(encoded) > MAX_SUMMARY_BYTES:
+        suffix = b"\n\n_Result truncated to the safe GitHub summary limit._"
+        encoded = encoded[: MAX_SUMMARY_BYTES - len(suffix)]
+        markdown = encoded.decode("utf-8", errors="ignore") + suffix.decode()
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(markdown + "\n")
 
 
 def _fail(message: str) -> "None":
-    print(f"::error::{message}")
+    clean = " ".join(str(message).splitlines())[:500]
+    clean = clean.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::error title=PCI payment page script check::{clean}")
     sys.exit(1)
+
+
+def _https_url(value: str, *, label: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (UnicodeError, ValueError):
+        _fail(f"{label} must be a valid https URL.")
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+    ):
+        _fail(f"{label} must be a valid https URL without credentials or a custom port.")
+    return value
+
+
+def _read_workspace_html(raw_path: str) -> str:
+    root_raw = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
+    try:
+        root = Path(root_raw).resolve(strict=True)
+    except OSError:
+        _fail("The workflow workspace could not be resolved.")
+    supplied = Path(raw_path)
+    if supplied.is_absolute() or ".." in supplied.parts:
+        _fail("html-file must be a relative path inside the workflow workspace.")
+
+    current = root
+    for part in supplied.parts:
+        current = current / part
+        if current.is_symlink():
+            _fail("html-file must not use a symbolic link.")
+    try:
+        candidate = (root / supplied).resolve(strict=True)
+        candidate.relative_to(root)
+    except FileNotFoundError:
+        _fail("html-file was not found in the workflow workspace.")
+    except (OSError, ValueError):
+        _fail("html-file must stay inside the workflow workspace.")
+    if not candidate.is_file():
+        _fail("html-file must name a regular file.")
+    try:
+        content = candidate.read_bytes()
+    except OSError:
+        _fail("html-file could not be read.")
+    if len(content) > MAX_HTML_BYTES:
+        _fail(f"html-file exceeds the {MAX_HTML_BYTES}-byte limit.")
+    try:
+        decoded = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        _fail("html-file must be valid UTF-8.")
+    if "\x00" in decoded:
+        _fail("html-file must not contain NUL bytes.")
+    return decoded
 
 
 def build_request_body() -> dict:
@@ -65,29 +145,50 @@ def build_request_body() -> dict:
 
     body: dict = {}
     if html_file:
-        if not os.path.isfile(html_file):
-            _fail(f"html-file not found: {html_file}")
-        size = os.path.getsize(html_file)
-        if size > MAX_HTML_BYTES:
-            _fail(f"html-file is {size} bytes; the limit is {MAX_HTML_BYTES}.")
-        with open(html_file, "r", encoding="utf-8", errors="replace") as handle:
-            body["html"] = handle.read()
-        # The service attributes relative script URLs against this.
-        body["url"] = url or "https://example.invalid/checkout"
+        body["html"] = _read_workspace_html(html_file)
+        # The service uses this only to resolve relative script URLs. It does
+        # not fetch page-origin when saved HTML was supplied.
+        body["url"] = _https_url(
+            _in("PAGE_ORIGIN", DEFAULT_PAGE_ORIGIN), label="page-origin"
+        )
     else:
-        if not url.startswith("https://"):
-            _fail("`url` must be an https URL. A payment page served over http "
-                  "cannot satisfy PCI DSS regardless of what this check reports.")
-        body["url"] = url
+        body["url"] = _https_url(url, label="url")
 
     allowed = [d.strip() for d in _in("ALLOWED_DOMAINS").split(",") if d.strip()]
     if allowed:
         body["allowed_domains"] = allowed
+    scope = _in("PAYMENT_PAGE_SCOPE", "unspecified").lower()
+    if scope not in PAYMENT_PAGE_SCOPES:
+        _fail(
+            "payment-page-scope must be unspecified, direct, embedded, or outsourced."
+        )
+    if scope != "unspecified":
+        body["payment_page_scope"] = scope
     return body
 
 
 def call_service(body: dict) -> dict:
     base = _in("API_BASE", "https://qi.toledotechnologies.com").rstrip("/")
+    try:
+        parsed = urlsplit(base)
+        loopback_http = parsed.scheme == "http" and parsed.hostname in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }
+        valid_base = (
+            (parsed.scheme == "https" or loopback_http)
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+            and parsed.path in {"", "/"}
+        )
+    except (UnicodeError, ValueError):
+        valid_base = False
+    if not valid_base:
+        _fail("api-base must be an https origin (loopback http is allowed for tests).")
     request = urllib.request.Request(
         f"{base}/api/v1/scan/pci",
         data=json.dumps(body).encode("utf-8"),
@@ -100,13 +201,47 @@ def call_service(body: dict) -> dict:
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            return json.loads(response.read() or b"{}")
+            payload = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(payload) > MAX_RESPONSE_BYTES:
+                _fail("The check service response exceeded the safe size limit.")
+            decoded = json.loads(
+                payload or b"{}",
+                parse_constant=_reject_json_constant,
+            )
+            if not isinstance(decoded, dict):
+                _fail("The check service returned an invalid response shape.")
+            return decoded
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
-        _fail(f"The check service returned HTTP {exc.code}: {detail}")
-    except Exception as exc:  # noqa: BLE001
-        _fail(f"Could not reach the check service: {type(exc).__name__}: {exc}")
+        _fail(f"The check service returned HTTP {exc.code}.")
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        _fail("The check service returned invalid JSON.")
+    except (OSError, TimeoutError) as exc:
+        _fail(f"Could not reach the check service ({type(exc).__name__}).")
     return {}
+
+
+def _one_line(value: object, *, limit: int = MAX_LOG_CHARS) -> str:
+    text = " ".join(str(value).splitlines())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _cell(value: object) -> str:
+    text = _one_line(value, limit=MAX_CELL_CHARS)
+    for character, replacement in {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "|": "&#124;",
+        "`": "&#96;",
+        "[": "&#91;",
+        "]": "&#93;",
+    }.items():
+        text = text.replace(character, replacement)
+    return text
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 def main() -> int:
@@ -114,13 +249,44 @@ def main() -> int:
     if result.get("error"):
         _fail(str(result["error"]))
 
-    gaps = result.get("proven_gaps") or []
-    total = int(result.get("total_findings") or 0)
-    headline = result.get("headline") or "Check complete."
-
     threshold = _in("FAIL_ON", "high").lower()
-    if threshold not in SEVERITY_RANK and threshold != "never":
+    if threshold not in FAIL_THRESHOLDS and threshold != "never":
         _fail(f"fail-on must be high, medium, low or never (got {threshold!r}).")
+
+    has_complete_findings = "observed_findings" in result
+    gaps = (
+        result.get("observed_findings")
+        if has_complete_findings
+        else result.get("proven_gaps") or []
+    )
+    if not isinstance(gaps, list) or any(not isinstance(gap, dict) for gap in gaps):
+        _fail("The check service returned an invalid findings list.")
+    if len(gaps) > MAX_FINDINGS:
+        _fail("The check service returned too many findings for safe workflow output.")
+    severities = [str(gap.get("severity", "")).lower() for gap in gaps]
+    if any(severity not in SEVERITY_RANK for severity in severities):
+        _fail("The check service returned an unknown finding severity.")
+    if threshold in {"medium", "low"} and not has_complete_findings:
+        _fail("The check service does not support the requested finding threshold.")
+    raw_total = result.get("total_findings", 0)
+    if isinstance(raw_total, bool) or not isinstance(raw_total, (int, str)):
+        _fail("The check service returned an invalid finding count.")
+    if isinstance(raw_total, str) and not raw_total.isdecimal():
+        _fail("The check service returned an invalid finding count.")
+    total = int(raw_total)
+    if total < 0:
+        _fail("The check service returned an invalid finding count.")
+    if has_complete_findings and total != len(gaps):
+        _fail("The check service returned an inconsistent finding count.")
+    report = json.dumps(
+        result,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if len(report.encode("utf-16-le")) > MAX_OUTPUT_UTF16_BYTES:
+        _fail("The check result is too large for a safe GitHub Actions output.")
+    headline = _cell(result.get("headline") or "Check complete.")
 
     blocking = []
     if threshold != "never":
@@ -134,17 +300,20 @@ def main() -> int:
     if gaps:
         lines += ["| Severity | Finding |", "| --- | --- |"]
         for gap in gaps:
-            message = str(gap.get("message", "")).replace("|", "\\|")
-            lines.append(f"| {gap.get('severity', '?')} | {message} |")
+            lines.append(
+                f"| {_cell(gap.get('severity', '?'))} | {_cell(gap.get('message', ''))} |"
+            )
     else:
-        lines.append("No blocking finding was returned for the checks performed.")
+        lines.append("No finding was returned for the bounded checks performed.")
+    if result.get("scope_note"):
+        lines.extend(["", f"**Scope:** {_cell(result['scope_note'])}"])
     lines += [
         "",
         "<sub>Software-generated evidence for qualified human review. It does not "
         "determine PCI DSS compliance and does not replace a QSA assessment. The "
-        "check reads the served HTML and the referenced script contents; it does "
-        "not execute the page, and it cannot decide whether a script is "
-        "authorized — only you can. "
+        "check reads served HTML; it does not inspect HTTP response headers, fetch "
+        "referenced script bytes, or execute the page. It cannot decide whether a "
+        "script is authorized — only you can. "
         "[What 6.4.3 and 11.6.1 ask for]"
         "(https://qi.toledotechnologies.com/pci)</sub>",
     ]
@@ -153,11 +322,13 @@ def main() -> int:
     passed = not blocking
     _out("passed", "true" if passed else "false")
     _out("findings", str(total))
-    _out("report", json.dumps(result))
+    _out("report", report)
 
-    print(headline)
+    print(f"Result: {_one_line(headline)}")
     for gap in gaps:
-        print(f"  [{gap.get('severity')}] {gap.get('message')}")
+        severity = _one_line(gap.get("severity", "?"), limit=50)
+        message = _one_line(gap.get("message", ""))
+        print(f"Finding [{severity}]: {message}")
 
     if not passed:
         print(f"::error::{len(blocking)} finding(s) at or above '{threshold}'.")

@@ -1,5 +1,5 @@
 name: 'PCI Payment Page Script Check'
-description: 'Inventory the third-party scripts on a payment page and fail the build on scripts you have not authorized (PCI DSS v4.0.1 req 6.4.3 / 11.6.1).'
+description: 'Bounded PCI payment-page script inventory; fail CI on observed hosts outside your authorization list.'
 author: 'Toledo Technologies LLC'
 branding:
   icon: 'shield'
@@ -11,9 +11,13 @@ inputs:
     required: false
     default: ''
   html-file:
-    description: 'Path to a saved HTML file to check instead of a URL. Use when the page needs a login or is not deployed yet.'
+    description: 'Relative path to UTF-8 HTML inside the workspace. Its contents are sent to the hosted check; never include credentials, card data, authenticated DOM state, or private source.'
     required: false
     default: ''
+  page-origin:
+    description: 'HTTPS page URL used to resolve relative script sources in html-file mode. It is not fetched in that mode.'
+    required: false
+    default: 'https://example.invalid/checkout'
   allowed-domains:
     description: 'Comma-separated hosts you have authorized to serve scripts, e.g. "js.stripe.com,www.googletagmanager.com". Leave blank for an inventory with no authorization check.'
     required: false
@@ -22,6 +26,10 @@ inputs:
     description: 'Fail the job when findings at this severity or above are present: high, medium, low, or never.'
     required: false
     default: 'high'
+  payment-page-scope:
+    description: 'Payment flow: direct, embedded processor form, outsourced redirect, or unspecified. Only direct can expose requirement-specific paid next steps.'
+    required: false
+    default: 'unspecified'
   api-base:
     description: 'Override the service endpoint. Only needed for self-hosting.'
     required: false
@@ -47,6 +55,8 @@ runs:
       env:
         INPUT_URL: ${{ inputs.url }}
         INPUT_HTML_FILE: ${{ inputs.html-file }}
+        INPUT_PAGE_ORIGIN: ${{ inputs.page-origin }}
         INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_PAYMENT_PAGE_SCOPE: ${{ inputs.payment-page-scope }}
         INPUT_API_BASE: ${{ inputs.api-base }}
