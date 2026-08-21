@@ -44,6 +44,53 @@ Checking a page that is not deployed yet, or sits behind a login:
 artifact, not an authenticated DOM dump. Never include credentials, card data,
 customer data, payment details, or private source.
 
+### Choose the recipe that matches the payment flow
+
+The scope input is not a compliance answer. It prevents the check from turning
+an observed script into the wrong product recommendation. Confirm the applicable
+questionnaire and responsibilities with your acquirer or qualified reviewer.
+
+**Card fields served by your systems.** Check the page that renders those
+fields and list the script hosts your review has authorized:
+
+```yaml
+- uses: ntoledo319/pci-payment-page-check@v1
+  with:
+    url: https://yourstore.com/checkout
+    allowed-domains: js.stripe.com, www.googletagmanager.com
+    fail-on: high
+    payment-page-scope: direct
+```
+
+**Processor-owned form or iframe embedded in your page.** The check can
+inventory scripts in the merchant page's served HTML. It cannot inspect inside
+a cross-origin processor frame, execute JavaScript, or prove the SAQ A
+eligibility criterion is satisfied:
+
+```yaml
+- uses: ntoledo319/pci-payment-page-check@v1
+  with:
+    url: https://yourstore.com/checkout
+    allowed-domains: js.stripe.com
+    fail-on: high
+    payment-page-scope: embedded
+```
+
+**Redirect or fully outsourced processor page.** Run the check only on a page
+you own or are authorized to inspect. The `outsourced` choice keeps the result
+from manufacturing direct-page 6.4.3 or 11.6.1 paid next steps:
+
+```yaml
+- uses: ntoledo319/pci-payment-page-check@v1
+  with:
+    url: https://yourstore.com/cart
+    fail-on: high
+    payment-page-scope: outsourced
+```
+
+Do not point the Action at the processor's hosted payment page unless the
+processor has explicitly authorized that use.
+
 ### Inputs
 
 | Input | Default | Description |
