@@ -182,9 +182,14 @@ The free result is an observation, not a compliance determination. If it finds
 an actionable gap, inspect the representative deliverables before deciding
 whether to buy:
 
-- [PCI DSS 6.4.3 remediation-pack sample](https://qi.toledotechnologies.com/samples/pci-dss-6-4-3-remediation-pack)
-- [PCI DSS 11.6.1 evidence-ledger sample](https://qi.toledotechnologies.com/samples/pci-dss-11-6-1-evidence-ledger)
+- [PCI DSS 6.4.3 remediation-pack sample](https://qi.toledotechnologies.com/samples/pci-dss-6-4-3-remediation-pack) — **$299 once**: finding-by-finding observation, risk, fix, and validation guidance.
+- [PCI DSS 11.6.1 evidence-ledger sample](https://qi.toledotechnologies.com/samples/pci-dss-11-6-1-evidence-ledger) — **$99/month**: a 72-hour cadence, hash-chained evaluation history.
 - [Run the browser check or compare exact prices](https://qi.toledotechnologies.com/pci-4-compliance-scanner)
+
+The samples are synthetic and contain the same evidence sections as a real
+delivery, so you can judge the artifact before paying. Neither product is a
+compliance certification, and neither is legal advice — 6.4.3 and 11.6.1 are
+assessed by your QSA or on your SAQ, not by this tool.
 
 ## Ongoing monitoring
 
